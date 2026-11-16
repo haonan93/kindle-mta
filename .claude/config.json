@@ -1,0 +1,11 @@
+{
+  "project": "re-kindle-subway-sign",
+  "target_hardware": "Kindle Paperwhite 5 (M2L3EK) 1236x1648",
+  "description": "Sideways Kindle e-ink NYC subway countdown sign with white/black theme toggle, larger 40pt last-updated timestamp patch, partial minute-only eips updates, rotation controls, local admin UI, and standalone native Kindle script",
+  "entrypoints": {
+    "server": "server.py",
+    "kindle_client": "extensions/dashboard/run.sh",
+    "kindle_native": "kindle-native/native_sign.py",
+    "config": "config.json"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "theme": "black",
+  "row1": {
+    "line": "G",
+    "label": "Queens",
+    "stop_id": "G33N"
+  },
+  "row2": {
+    "line": "G",
+    "label": "Brooklyn",
+    "stop_id": "G33S"
+  }
+}
