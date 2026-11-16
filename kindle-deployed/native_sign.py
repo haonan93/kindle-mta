@@ -77,6 +77,43 @@ def get_colors(theme):
     return 255, 0
 
 
+
+def log_battery_stats(csv_path="/mnt/us/subway-sign/battery_log.csv"):
+    cap, volt_mv, curr_ma = "", "", ""
+    for base in glob.glob("/sys/class/power_supply/*"):
+        c_file = os.path.join(base, "capacity")
+        if os.path.exists(c_file):
+            try:
+                with open(c_file) as f:
+                    cap = f.read().strip()
+                v_file = os.path.join(base, "voltage_now")
+                if os.path.exists(v_file):
+                    with open(v_file) as f:
+                        v = int(f.read().strip())
+                        volt_mv = str(v // 1000 if v > 10000 else v)
+                i_file = os.path.join(base, "current_now")
+                if os.path.exists(i_file):
+                    with open(i_file) as f:
+                        i = int(f.read().strip())
+                        curr_ma = str(i // 1000 if abs(i) > 10000 else i)
+                break
+            except Exception:
+                pass
+    if not cap or not volt_mv:
+        try:
+            cap = cap or subprocess.check_output(["gasgauge-info", "-s"], text=True).strip().rstrip("%")
+            volt_mv = volt_mv or subprocess.check_output(["gasgauge-info", "-v"], text=True).strip().split()[0]
+            curr_ma = curr_ma or subprocess.check_output(["gasgauge-info", "-c"], text=True).strip().split()[0]
+        except Exception:
+            pass
+    write_hdr = not os.path.exists(csv_path)
+    with open(csv_path, "a") as f:
+        if write_hdr:
+            f.write("timestamp,percent,voltage_mv,current_ma\n")
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        f.write(f"{ts},{cap},{volt_mv},{curr_ma}\n")
+
+
 def get_battery_percent():
     for path in glob.glob("/sys/class/power_supply/*/capacity"):
         try:
@@ -179,6 +216,55 @@ def draw_updated_patch(out_path, x_pos, y_pos, theme="white"):
     _blit_rotated(img, out_path, x_pos, y_pos)
 
 
+
+def _in_time_window(now_dt, rule):
+    if now_dt.weekday() not in rule.get("days", [0, 1, 2, 3, 4, 5, 6]):
+        return False
+    sh, sm = map(int, rule["start"].split(":"))
+    eh, em = map(int, rule["end"].split(":"))
+    cur_m = now_dt.hour * 60 + now_dt.minute
+    start_m = sh * 60 + sm
+    end_m = eh * 60 + em
+    if start_m <= end_m:
+        return start_m <= cur_m < end_m
+    return cur_m >= start_m or cur_m < end_m
+
+
+def get_current_mode(cfg):
+    sched = cfg.get("schedule", {})
+    intervals = sched.get("intervals_sec", {"live": 60, "off_peak": 120, "battery_saver": 3600})
+    now_dt = datetime.datetime.now()
+
+    for rule in sched.get("battery_saver", [{"days": [0, 1, 2, 3, 4, 5, 6], "start": "22:00", "end": "06:00"}]):
+        if _in_time_window(now_dt, rule):
+            return "battery_saver", "BATTERY SAVER", int(intervals.get("battery_saver", 3600))
+
+    default_live = [
+        {"days": [0, 1, 2, 3, 4], "start": "08:00", "end": "10:00"},
+        {"days": [5, 6], "start": "08:00", "end": "18:00"},
+    ]
+    for rule in sched.get("live", default_live):
+        if _in_time_window(now_dt, rule):
+            return "live", "LIVE", int(intervals.get("live", 60))
+
+    return "off_peak", "OFF PEAK", int(intervals.get("off_peak", 120))
+
+
+def draw_mode_badge(mode_key, mode_label, theme="white"):
+    bg, fg = get_colors(theme)
+    img = Image.new("L", (340, 68), color=bg)
+    draw = ImageDraw.Draw(img)
+    if mode_key == "live":
+        draw.rectangle([2, 2, 337, 65], fill=fg)
+        draw.ellipse([20, 24, 40, 44], fill=bg)
+        draw.text((190, 34), mode_label, fill=bg, font=get_font(32), anchor="mm")
+    else:
+        draw.rectangle([2, 2, 337, 65], outline=fg, width=4)
+        draw.text((170, 34), mode_label, fill=fg, font=get_font(32), anchor="mm")
+    # y_pos=1283 -> 1648 - 1283 - 340 = 25px from left edge; x_pos=25 -> 25px from top edge
+    _blit_rotated(img, "/tmp/mode_badge.png", 25, 1283)
+
+
 def draw_back_button(theme="white"):
     bg, fg = get_colors(theme)
     img = Image.new("L", (170, 56), color=bg)
@@ -235,6 +321,8 @@ def main_loop():
     last_mtime = None
     last_r1 = None
     last_r2 = None
+    last_bat = None
+    last_mode = None
     ticks = 0
 
     while True:
@@ -248,6 +336,8 @@ def main_loop():
                 last_mtime = cur_mtime
                 last_r1 = None
                 last_r2 = None
+                last_bat = None
+                last_mode = None
                 ticks = 0
 
             row1_spec = (cfg["row1"]["line"], cfg["row1"]["stop_id"])
@@ -255,21 +345,32 @@ def main_loop():
             arrivals = fetch_all_arrivals([row1_spec, row2_spec])
 
             r1 = arrivals[row1_spec[1]]
-            if r1 != last_r1:
+            r1_changed = (r1 != last_r1)
+            if r1_changed:
                 draw_minutes_patch(r1, "/tmp/row1.png", 290, 53, theme=theme)
                 last_r1 = r1
 
             r2 = arrivals[row2_spec[1]]
-            if r2 != last_r2:
+            r2_changed = (r2 != last_r2)
+            if r2_changed:
                 draw_minutes_patch(r2, "/tmp/row2.png", 885, 53, theme=theme)
                 last_r2 = r2
 
-            draw_updated_patch("/tmp/updated.png", 1130, 50, theme=theme)
+            bat = get_battery_percent()
+            if r1_changed or r2_changed or bat != last_bat or (ticks % 5 == 0):
+                draw_updated_patch("/tmp/updated.png", 1130, 50, theme=theme)
+                last_bat = bat
+            if ticks % 5 == 0:
+                log_battery_stats()
+            mode_key, mode_label, interval_sec = get_current_mode(cfg)
+            if mode_key != last_mode:
+                draw_mode_badge(mode_key, mode_label, theme=theme)
+                last_mode = mode_key
             ticks += 1
         except Exception as e:
             print("Update error:", e, flush=True)
 
-        time.sleep(max(5.0, 60.0 - (time.time() % 60.0)))
+        time.sleep(max(5.0, interval_sec - (time.time() % interval_sec)))
 
 
 if __name__ == "__main__":
